@@ -1,6 +1,6 @@
-# ⚡ Quick Start Guide
+# Quick Start Guide
 
-## 🎯 Get Your Unified API Running in 3 Steps
+## Get Your Unified API Running in 3 Steps
 
 ### Step 1: Install Dependencies
 
@@ -22,7 +22,7 @@ ollama pull llava:7b
 python api_server_integrated.py
 ```
 
-That's it! 🎉
+That's it!
 
 ## Direct approach
 
@@ -38,14 +38,14 @@ chmod +x start_server.sh
 start_server.bat
 ```
 
-## 🌐 Access Your API
+## Access Your API
 
 - **API Server**: http://localhost:8000
 - **Interactive Docs**: http://localhost:8000/docs
 - **Alternative Docs**: http://localhost:8000/redoc
 
 
-## 📡 Example Usage
+## Example Usage
 
 ### Python
 
@@ -97,7 +97,7 @@ curl -X POST "http://localhost:8000/embed/audio" \
   -F "file=@audio.mp3"
 ```
 
-## 📚 Available Endpoints
+## Available Endpoints
 
 1. **POST** `/summarize` - Summarize retrieved document chunks
 2. **POST** `/embed/text` - Generate text embeddings
@@ -107,7 +107,7 @@ curl -X POST "http://localhost:8000/embed/audio" \
 6. **GET** `/` - API information
 7. **GET** `/docs` - Interactive API documentation
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
 ### Server won't start?
 
@@ -145,22 +145,16 @@ Install FFmpeg:
 - **Mac**: `brew install ffmpeg`
 - **Linux**: `sudo apt-get install ffmpeg`
 
-## 📖 Documentation
-
-For detailed documentation, see:
-- **README_INTEGRATED_API.md** - Complete API documentation
-- **MIGRATION_GUIDE.md** - Migration from old APIs
-- **Interactive Docs** - http://localhost:8000/docs
-
-## 🎓 What's Included?
+  
+## What's Included?
 
 This unified API combines:
 
-✅ **Content Summarization** (from `api_server.py`)
+✅ **Content Summarization**
 - Answer questions using retrieved documents
 - Powered by Gemma 3 4B model
 
-✅ **Multi-Modal Embeddings** (from `Query_pipeline.py`)
+✅ **Multi-Modal Embeddings**
 - Text embeddings
 - Image embeddings (via LLaVA vision model)
 - Audio embeddings (via Whisper transcription)
@@ -176,14 +170,14 @@ This unified API combines:
 - CORS enabled
 - API documentation
 
-## 🚀 Next Steps
+## Next Steps
 
 1. ✅ Server running? → Test with `test_integrated_api.py`
 2. ✅ Tests passing? → Check docs at `/docs`
 3. ✅ Ready to integrate? → See `README_INTEGRATED_API.md` for examples
 4. ✅ Deploying? → See deployment section in README
 
-## 💡 Tips
+## Tips
 
 - **Performance**: GPU-enabled Ollama models run faster
 - **Monitoring**: Check `api_server.log` for detailed logs
@@ -192,6 +186,4 @@ This unified API combines:
 
 ---
 
-**Happy Coding! 🎉**
-
-Made with ❤️ for NASA Space Apps
+Made for NASA Space Apps
