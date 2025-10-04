@@ -26,12 +26,15 @@ That's it! 🎉
 
 ## Direct approach
 
-- You can run it instantly with the command in **Linux**:
+### Linux:
+
 ```bash
-start_server.sh
+chmod +x start_server.sh
+./start_server.sh
 ```
-For **Windows**:
-```
+
+### Windows:
+```cmd
 start_server.bat
 ```
 
