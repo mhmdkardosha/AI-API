@@ -1,0 +1,45 @@
+# ============================================================================
+# Unified Multi-Modal API Server - Dependencies
+# ============================================================================
+# Based on imports in api_server_integrated.py
+# ============================================================================
+
+# Web Framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6  # Required for file uploads (Form, UploadFile, File)
+
+# Data Validation
+pydantic>=2.0.0
+
+# LangChain - Core and Ollama Integration
+langchain>=0.1.0
+langchain-core>=0.1.0
+langchain-ollama>=0.0.1
+
+# Audio Processing - Whisper
+openai-whisper>=20231117
+
+# HTTP Requests
+requests>=2.31.0
+
+# Note: The following are built-in Python libraries (no installation needed):
+# - logging (with RotatingFileHandler)
+# - subprocess
+# - tempfile
+# - base64
+# - signal
+# - sys
+# - os
+# - time
+# - atexit
+# - typing
+# - contextlib
+
+# Optional: Performance & Monitoring
+# prometheus-client>=0.19.0  # For metrics
+# sentry-sdk>=1.38.0  # For error tracking
+
+# Optional: Testing
+# pytest>=7.4.0
+# httpx>=0.25.0  # For testing FastAPI endpoints
