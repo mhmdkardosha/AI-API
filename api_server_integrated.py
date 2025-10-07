@@ -16,7 +16,8 @@ Endpoints:
 from fastapi import FastAPI, HTTPException, status, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+from io import BytesIO
 import uvicorn
 import requests
 import subprocess
@@ -27,6 +28,7 @@ import sys
 import atexit
 import tempfile
 import base64
+import binascii
 import logging
 from logging.handlers import RotatingFileHandler
 from contextlib import asynccontextmanager
@@ -39,6 +41,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 # Whisper for audio processing
 import whisper
+
+# PIL for image processing
+from PIL import Image, UnidentifiedImageError
 
 # ============================================================================
 # Logging Setup
@@ -330,7 +335,7 @@ app.add_middleware(
 
 class SummarizeRequest(BaseModel):
     """Summarization request."""
-    question: str = Field(..., description="User's question", min_length=1)
+    question: Optional[str] = Field(None, description="User's question. Leave empty to request a context summary.")
     top_k_texts: List[str] = Field(..., description="Retrieved text chunks", min_items=1)
     max_context_length: Optional[int] = Field(MAX_CONTEXT_LENGTH, description="Max context length", gt=0)
     show_context: Optional[bool] = Field(False, description="Include context in response")
@@ -355,12 +360,14 @@ class SummarizeResponse(BaseModel):
     success: bool
     error: Optional[str] = None
     context: Optional[str] = None
+    auto_question: Optional[str] = Field(None, description="Question automatically generated when none was provided")
 
 
 class EmbeddingResponse(BaseModel):
     """Embedding response."""
     embedding: List[float]
     dimension: int
+    text: Optional[str] = Field(None, description="Textual description or transcript used for the embedding")
 
 
 class HealthResponse(BaseModel):
@@ -374,7 +381,7 @@ class HealthResponse(BaseModel):
 # ============================================================================
 
 def summarize_retrieved_content(
-    question: str,
+    question: Optional[str],
     top_k_texts: List[str],
     max_context_length: int = MAX_CONTEXT_LENGTH,
     show_context: bool = False
@@ -403,11 +410,16 @@ def summarize_retrieved_content(
     if len(context) > max_context_length:
         context = context[:max_context_length] + "\n\n[Context truncated...]"
     
+    # Determine question
+    effective_question = (question or "").strip()
+    if not effective_question:
+        effective_question = "Provide a comprehensive, well-structured summary of the supplied context."
+
     # Generate answer
     try:
         answer = summarization_chain.invoke({
             "context": context,
-            "question": question
+            "question": effective_question
         })
         
         result = {
@@ -416,6 +428,8 @@ def summarize_retrieved_content(
             "context_length": len(context),
             "success": True
         }
+        if question is None or not question.strip():
+            result["auto_question"] = effective_question
         
         if show_context:
             result["context"] = context
@@ -448,44 +462,159 @@ def process_text(text: str) -> List[float]:
         raise
 
 
-def process_image(image_path: str) -> List[float]:
-    """Process image and return embedding."""
-    logger.info(f"Processing image: {image_path}")
-    
-    if not os.path.exists(image_path):
-        logger.error(f"Image file not found: {image_path}")
-        raise FileNotFoundError(f"Image file {image_path} not found")
-    
+def process_image(image_bytes: bytes, original_format: str = None) -> Tuple[List[float], str]:
+    """Process image from bytes and return embedding.
+
+    Args:
+        image_bytes: Raw image bytes or base64 payload
+        original_format: Original image format (e.g., 'png', 'jpeg')
+
+    Returns:
+        Tuple containing the embedding vector and the generated description
+    """
+    logger.info(f"Processing image from memory (size: {len(image_bytes)} bytes)")
+
+    def _decode_base64_payload(raw_bytes: bytes) -> Optional[Dict[str, Any]]:
+        """Attempt to interpret the incoming bytes as a data URI or raw base64 string."""
+        try:
+            text = raw_bytes.decode('utf-8').strip()
+        except UnicodeDecodeError:
+            return None
+
+        if not text:
+            return None
+
+        detected_format = None
+        if text.startswith('data:'):
+            header, _, encoded = text.partition(',')
+            mime_section = header[5:]
+            if ';' in mime_section:
+                mime_type, _, _ = mime_section.partition(';')
+            else:
+                mime_type = mime_section
+            if '/' in mime_type:
+                detected_format = mime_type.split('/')[-1]
+            text = encoded
+
+        normalized = text.replace('\n', '').replace('\r', '')
+
+        try:
+            decoded_bytes = base64.b64decode(normalized, validate=True)
+        except (binascii.Error, ValueError):
+            return None
+
+        return {"bytes": decoded_bytes, "format": detected_format}
+
+    img = None
+
     try:
-        # Read and encode image
-        with open(image_path, "rb") as image_file:
-            image_data = base64.b64encode(image_file.read()).decode('utf-8')
-        
-        logger.info("Image encoded, sending to vision model")
+        decoded_hint_format = None
+        try:
+            img = Image.open(BytesIO(image_bytes))
+        except UnidentifiedImageError:
+            logger.warning("Initial image open failed; attempting base64 decode fallback")
+            decoded = _decode_base64_payload(image_bytes)
+            if not decoded:
+                raise ValueError("Invalid image file: data is neither a supported binary image nor a valid base64 payload")
+            image_bytes = decoded["bytes"]
+            decoded_hint_format = decoded.get("format")
+            try:
+                img = Image.open(BytesIO(image_bytes))
+            except UnidentifiedImageError:
+                raise ValueError("Invalid image file: decoded payload is not a supported image format")
+
+        img.load()
+
+        img_format = (img.format or decoded_hint_format or original_format or 'jpeg').lower()
+        img_size = len(image_bytes)
+        logger.info(f"Image info: format={img_format}, size={img_size} bytes, dimensions={img.size}")
+
+        # Check file size (limit to 20MB)
+        if img_size > 20 * 1024 * 1024:
+            raise ValueError(f"Image too large: {img_size / (1024*1024):.2f}MB. Maximum allowed: 20MB")
+
+        # Resize if image is too large (max 2048x2048)
+        max_dimension = 2048
+        if img.width > max_dimension or img.height > max_dimension:
+            logger.info(f"Resizing image from {img.size} to fit {max_dimension}x{max_dimension}")
+            img.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+
+            output = BytesIO()
+            save_format = img_format if img_format in {"jpeg", "jpg", "png", "webp", "gif", "bmp"} else 'png'
+            save_kwargs: Dict[str, Any] = {}
+
+            if save_format in {"jpeg", "jpg"} and img.mode not in {"RGB", "L"}:
+                logger.info(f"Converting image mode from {img.mode} to RGB for JPEG compatibility")
+                img = img.convert('RGB')
+
+            if save_format in {"jpeg", "jpg"}:
+                save_kwargs["quality"] = 85
+
+            img.save(output, format=save_format.upper(), **save_kwargs)
+            image_bytes = output.getvalue()
+            img_format = save_format
+            img_size = len(image_bytes)
+            logger.info(f"Image resized (new size: {img_size} bytes, format={img_format})")
+
+        # Determine MIME type
+        mime_types = {
+            'jpeg': 'image/jpeg',
+            'jpg': 'image/jpeg',
+            'png': 'image/png',
+            'gif': 'image/gif',
+            'webp': 'image/webp',
+            'bmp': 'image/bmp'
+        }
+        mime_type = mime_types.get(img_format, 'image/png')
+        logger.info(f"Using MIME type: {mime_type}")
+
+        # Encode image to base64
+        image_data = base64.b64encode(image_bytes).decode('utf-8')
+
+        logger.info(f"Image encoded (base64 length: {len(image_data)}), sending to vision model")
+
+        # Create message with proper MIME type
         message = HumanMessage(
             content=[
-                {"type": "text", "text": "Describe this image in detail. Don't mention any text like: 'this image describes or represnts', just respond with the detailed description"},
+                {"type": "text", "text": "Describe this image in detail. Don't mention any text like: 'this image describes or represents', just respond with the detailed description"},
                 {
                     "type": "image_url",
-                    "image_url": f"data:image/jpeg;base64,{image_data}"
+                    "image_url": f"data:{mime_type};base64,{image_data}"
                 }
             ]
         )
+
+        # Invoke vision model with timeout handling
+        logger.info("Invoking vision model...")
         response = vision_llm.invoke([message])
         description = response.content
         logger.info(f"Image description generated: {description[:100]}...")
-        
+
         # Generate embedding from description
+        logger.info("Generating embedding from description...")
         embedding = embeddings.embed_query(description)
         logger.info(f"Image embedding generated: dimension={len(embedding)}")
-        return embedding
-    except Exception as e:
-        logger.error(f"Error processing image: {e}")
+        return embedding, description
+
+    except ValueError as ve:
+        logger.error(f"Validation error: {ve}")
         raise
+    except Exception as e:
+        logger.error(f"Error processing image: {e}", exc_info=True)
+        if "model runner" in str(e).lower():
+            raise Exception(
+                "Vision model crashed (possibly out of memory). "
+                "Try: 1) Using a smaller image, 2) Restarting Ollama server, "
+                f"3) Using a smaller vision model. Original error: {str(e)}"
+            )
+        raise
+    finally:
+        if img is not None:
+            img.close()
 
 
-def process_audio(audio_path: str) -> List[float]:
-    """Process audio and return embedding."""
+def process_audio(audio_path: str) -> Tuple[List[float], str]:
+    """Process audio and return embedding with transcript."""
     logger.info(f"Processing audio: {audio_path}")
     
     if not os.path.exists(audio_path):
@@ -512,7 +641,7 @@ def process_audio(audio_path: str) -> List[float]:
         # Generate embedding
         embedding = embeddings.embed_query(enhanced_text)
         logger.info(f"Audio embedding generated: dimension={len(embedding)}")
-        return embedding
+        return embedding, enhanced_text
     except Exception as e:
         logger.error(f"Error processing audio: {e}")
         raise
@@ -619,59 +748,114 @@ async def embed_text(text: str = Form(...)):
     """
     try:
         embedding = process_text(text)
-        return EmbeddingResponse(embedding=embedding, dimension=len(embedding))
+        return EmbeddingResponse(embedding=embedding, dimension=len(embedding), text=text)
     except Exception as e:
         logger.error(f"Text embedding endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/embed/image", response_model=EmbeddingResponse, tags=["Embeddings"])
-async def embed_image(file: UploadFile = File(...)):
+async def embed_image(file: UploadFile = File(..., description="Image file (multipart/form-data)")):
     """
     Generate embedding for image input.
     
     Upload an image file to get its embedding vector.
+    
+    **Request Format:** multipart/form-data
+    **Field Name:** file
+    **Supported formats:** JPEG, PNG, GIF, WebP, BMP
+    **Maximum file size:** 20MB
+    
+    **Example using curl:**
+    ```bash
+    curl -X POST "http://localhost:8000/embed/image" \\
+         -F "file=@/path/to/image.png"
+    ```
+    
+    **Example using Python requests:**
+    ```python
+    import requests
+    with open('image.png', 'rb') as f:
+        response = requests.post(
+            'http://localhost:8000/embed/image',
+            files={'file': f}
+        )
+    ```
     """
-    logger.info(f"Received image upload: {file.filename}")
-    tmp_path = None
+    logger.info(f"Received image upload: {file.filename} (content-type: {file.content_type})")
     
     try:
-        # Save uploaded file temporarily
-        with tempfile.NamedTemporaryFile(
-            delete=False, 
-            suffix=os.path.splitext(file.filename)[1], 
-            mode='wb'
-        ) as tmp:
-            content = await file.read()
-            tmp.write(content)
-            tmp.flush()
-            tmp_path = tmp.name
-            logger.info(f"Image saved to temp file: {tmp_path}")
+        # Validate content type
+        allowed_content_types = [
+            'image/jpeg', 'image/jpg', 'image/png', 
+            'image/gif', 'image/webp', 'image/bmp'
+        ]
+        if file.content_type and file.content_type not in allowed_content_types:
+            logger.warning(f"Content-Type '{file.content_type}' not in allowed list, checking extension")
         
-        # Process image
-        embedding = process_image(tmp_path)
-        return EmbeddingResponse(embedding=embedding, dimension=len(embedding))
+        # Validate file extension
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        allowed_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
+        if file_ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type: {file_ext}. Allowed: {', '.join(allowed_extensions)}"
+            )
+        
+        # Read file content directly into memory
+        image_bytes = await file.read()
+        file_size = len(image_bytes)
+        logger.info(f"Received file size: {file_size / 1024:.2f} KB")
+        
+        # Extract format from extension
+        img_format = file_ext.lstrip('.').lower()
+        
+        # Process image directly from memory
+        embedding, description = process_image(image_bytes, img_format)
+        return EmbeddingResponse(embedding=embedding, dimension=len(embedding), text=description)
     
+    except HTTPException:
+        raise
+    except ValueError as ve:
+        logger.warning(f"Image validation error: {ve}")
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         logger.error(f"Image embedding endpoint error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    
-    finally:
-        # Cleanup temp file
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-            logger.info(f"Cleaned up temp file: {tmp_path}")
+        error_detail = str(e)
+        if "model runner" in error_detail.lower():
+            error_detail = "Vision model crashed. Please try a smaller image or restart the server."
+        raise HTTPException(status_code=500, detail=error_detail)
 
 
 @app.post("/embed/audio", response_model=EmbeddingResponse, tags=["Embeddings"])
-async def embed_audio(file: UploadFile = File(...)):
+async def embed_audio(file: UploadFile = File(..., description="Audio file (multipart/form-data)")):
     """
     Generate embedding for audio input.
     
-    Upload an audio file (mp3, wav, m4a, etc.) to get its embedding vector.
-    The audio will be transcribed and converted to an embedding.
+    Upload an audio file to get its embedding vector.
+    The audio will be transcribed using Whisper and converted to an embedding.
+    
+    **Request Format:** multipart/form-data
+    **Field Name:** file
+    **Supported formats:** MP3, WAV, M4A, FLAC, OGG, AAC
+    
+    **Example using curl:**
+    ```bash
+    curl -X POST "http://localhost:8000/embed/audio" \\
+         -F "file=@/path/to/audio.mp3"
+    ```
+    
+    **Example using Python requests:**
+    ```python
+    import requests
+    with open('audio.mp3', 'rb') as f:
+        response = requests.post(
+            'http://localhost:8000/embed/audio',
+            files={'file': f}
+        )
+    ```
     """
-    logger.info(f"Received audio upload: {file.filename}")
+    logger.info(f"Received audio upload: {file.filename} (content-type: {file.content_type})")
     tmp_path = None
     
     try:
@@ -693,8 +877,8 @@ async def embed_audio(file: UploadFile = File(...)):
             logger.info(f"Audio saved to temp file: {tmp_path} (size: {len(content)} bytes)")
         
         # Process audio
-        embedding = process_audio(tmp_path)
-        return EmbeddingResponse(embedding=embedding, dimension=len(embedding))
+        embedding, transcript = process_audio(tmp_path)
+        return EmbeddingResponse(embedding=embedding, dimension=len(embedding), text=transcript)
     
     except Exception as e:
         logger.error(f"Audio embedding endpoint error: {e}")
